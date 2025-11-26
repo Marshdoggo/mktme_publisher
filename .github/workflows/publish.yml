@@ -26,7 +26,7 @@ jobs:
       - name: Checkout mktme_data
         uses: actions/checkout@v4
         with:
-          repository: Marshdoggo/mktme_data
+          repository: Marshdoggo/mktme-data
           path: mktme_data
           # use your PAT so pushes work
           token: ${{ secrets.PUBLISHER_PAT }}
