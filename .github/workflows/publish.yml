@@ -35,12 +35,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 5) Install dependencies
-      - name: Install dependencies
+      # 5) Create venv and install dependencies (for run_publish.py)
+      - name: Create venv and install dependencies
         run: |
+          python -m venv venv
+          source venv/bin/activate
           python -m pip install --upgrade pip
-          pip install pandas yfinance requests python-dotenv
-
+          pip install pandas yfinance requests pyarrow python-dotenv
+          
       # 6) Run the publisher script
       - name: Run publisher
         env:
