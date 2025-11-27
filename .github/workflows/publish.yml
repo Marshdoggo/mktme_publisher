@@ -2,8 +2,7 @@ name: Daily Publisher
 
 on:
   schedule:
-    # 2 AM UTC = 6 PM PST (approx; will drift slightly around DST)
-    - cron: "0 2 * * 1-5"
+    - cron: "0 2 * * 1-5"   # 2 AM UTC = 6 PM PST, weekdays
   workflow_dispatch:
 
 jobs:
@@ -11,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout THIS repo (mktme_publisher)
+      # 1) Checkout this publisher repo
       - name: Checkout publisher repo
         uses: actions/checkout@v4
 
@@ -22,13 +21,12 @@ jobs:
           repository: Marshdoggo/Market_Metrics_Explorer
           path: Market_Metrics_Explorer
 
-      # 3) Checkout mktme_data where the parquet + manifest live
-      - name: Checkout mktme_data
+      # 3) Checkout mktme-data where the parquet + manifest live
+      - name: Checkout mktme-data
         uses: actions/checkout@v4
         with:
           repository: Marshdoggo/mktme-data
           path: mktme_data
-          # use your PAT so pushes work
           token: ${{ secrets.PUBLISHER_PAT }}
 
       # 4) Setup Python
@@ -37,40 +35,40 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 5) Install deps for the publisher
-      # (adjust this list if publish_mktme.py needs more packages)
+      # 5) Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas yfinance requests pyarrow
+          pip install pandas yfinance requests python-dotenv
 
       # 6) Run the publisher script
       - name: Run publisher
         env:
-          # point APP_SRC at the app's src/ folder we just checked out
-          MKTME_APP_SRC: ${{ github.workspace }}/Market_Metrics_Explorer/src
-          # point DATA_REPO at the mktme_data repo we checked out
-          MKTME_DATA_REPO: ${{ github.workspace }}/mktme_data
+          MKTME_APP_SRC: /home/runner/work/mktme_publisher/mktme_publisher/Market_Metrics_Explorer/src
+          PYTHONPATH: /home/runner/work/mktme_publisher/mktme_publisher/Market_Metrics_Explorer/src
           MKTME_GITHUB_USER: marshdoggo
+          MKTME_DATA_REPO: /home/runner/work/mktme_publisher/mktme_publisher/mktme_data
           MKTME_FORCE_REFRESH: "1"
-          GITHUB_TOKEN: ${{ secrets.PUBLISHER_PAT }}
+          PUBLISHER_PAT: ${{ secrets.PUBLISHER_PAT }}
         run: |
           python run_publish.py
 
-      # 7) Commit & push any updated parquet/manifest in mktme_data
+      # 7) Commit + push from mktme-data
       - name: Commit and push data repo
         working-directory: mktme_data
         env:
-          GITHUB_TOKEN: ${{ secrets.PUBLISHER_PAT }}
+          GITHUB_USER: marshdoggo
+          PUBLISHER_PAT: ${{ secrets.PUBLISHER_PAT }}
         run: |
-          git config user.name "Market Metrics Publisher"
-          git config user.email "no-reply@mktme.local"
+          git config user.name "Marshall Whiteley"
+          git config user.email "gullsdefense25@yahoo.com"
 
-          # Only commit if there are changes
-          if [ -n "$(git status --porcelain)" ]; then
-            git add sp500/prices.parquet manifest.json || true
-            git commit -m "Auto daily update $(date -u +'%Y-%m-%d')" || true
-            git push origin main
+          git status
+
+          if ! git diff --quiet; then
+            git add prices.parquet manifest.json
+            git commit -m "auto daily update $(date -u +'%Y-%m-%d')"
+            git push https://$GITHUB_USER:$PUBLISHER_PAT@github.com/Marshdoggo/mktme-data.git HEAD:main
           else
             echo "No changes to commit."
           fi
