@@ -2,7 +2,7 @@ name: Daily Publisher
 
 on:
   schedule:
-    - cron: "0 2 * * 1-5"   # 2 AM UTC = 6 PM PST, weekdays
+    - cron: "0 2 * * *"   # 2 AM UTC = 6 PM PST, weekdays
   workflow_dispatch:
 
 jobs:
