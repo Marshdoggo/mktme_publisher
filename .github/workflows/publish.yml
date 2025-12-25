@@ -2,7 +2,7 @@ name: Daily Publisher
 
 on:
   schedule:
-    - cron: "0 2 * * *"   # 2 AM UTC = 6 PM PST, weekdays
+    - cron: "0 2 * * 1-5"   # 2 AM UTC = 6 PM PST, weekdays
   workflow_dispatch:
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           python -m pip install --upgrade pip
-          pip install pandas yfinance requests pyarrow python-dotenv
+          pip install pandas yfinance requests pyarrow python-dotenv numpy openai scipy
           
       # 6) Run the publisher script
       - name: Run publisher
@@ -52,6 +52,7 @@ jobs:
           MKTME_DATA_REPO: /home/runner/work/mktme_publisher/mktme_publisher/mktme_data
           MKTME_FORCE_REFRESH: "1"
           PUBLISHER_PAT: ${{ secrets.PUBLISHER_PAT }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python run_publish.py
 
@@ -68,7 +69,7 @@ jobs:
           git status
 
           if ! git diff --quiet; then
-            git add sp500/prices.parquet manifest.json
+            git add sp500/prices.parquet manifest.json reports/
             git commit -m "auto daily update $(date -u +'%Y-%m-%d')"
             git push https://$GITHUB_USER:$PUBLISHER_PAT@github.com/Marshdoggo/mktme-data.git HEAD:main
           else
