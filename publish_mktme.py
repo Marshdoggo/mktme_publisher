@@ -41,14 +41,150 @@ from fetch_data import download_prices, download_prices_fx_window
 # Report builders from the app repo
 from ai_report import generate_daily_report, save_report_json, save_report_markdown
 
-try:
-    from ai_context import get_openai_client, build_view_context_text
-except Exception:
-    get_openai_client = None
-    build_view_context_text = None
+
+# NOTE: We intentionally do NOT use an LLM to write the daily brief.
+# The brief must be numerically consistent with dashboard tables.
+
 
 
 # ---- Helpers ----
+
+def _fmt_pct(x: float | int | None, digits: int = 2) -> str:
+    if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+        return "n/a"
+    return f"{100.0 * float(x):.{digits}f}%"
+
+
+def _fmt_num(x: float | int | None, digits: int = 2) -> str:
+    if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+        return "n/a"
+    return f"{float(x):.{digits}f}"
+
+
+def _build_deterministic_daily_brief_md(
+    *,
+    report: dict,
+    metrics_df: pd.DataFrame,
+    universe: str,
+    asof_date: str,
+    lookback: int,
+    run_utc: str,
+    top_n: int = 5,
+) -> str:
+    """Build an 'airtight' markdown brief using only computed values (no LLM).
+
+    This avoids any possibility of numeric hallucination by deriving all values from
+    `metrics_df` and `report`.
+    """
+    # Defensive: ensure expected columns exist
+    required_cols = {
+        "Ticker",
+        "Annualized Sharpe",
+        "Sortino Ratio",
+        "Daily Volatility (Std)",
+        "CAGR",
+        "Max Drawdown",
+        "RSI(14)",
+    }
+    missing = required_cols - set(metrics_df.columns)
+    if missing:
+        raise ValueError(f"metrics_df missing required columns: {sorted(missing)}")
+
+    df = metrics_df.copy()
+    df["Ticker_upper"] = df["Ticker"].astype(str).str.upper()
+
+    # Universe-level distribution stats
+    sharpe = pd.to_numeric(df["Annualized Sharpe"], errors="coerce")
+    vol = pd.to_numeric(df["Daily Volatility (Std)"], errors="coerce")
+    cagr = pd.to_numeric(df["CAGR"], errors="coerce")
+    mdd = pd.to_numeric(df["Max Drawdown"], errors="coerce")
+
+    sharpe_min, sharpe_med, sharpe_max = sharpe.min(), sharpe.median(), sharpe.max()
+    vol_min, vol_med, vol_max = vol.min(), vol.median(), vol.max()
+
+    # Leaders (top N by Annualized Sharpe)
+    leaders = (
+        df.sort_values("Annualized Sharpe", ascending=False)
+        .head(top_n)
+        .loc[:, [
+            "Ticker_upper",
+            "Annualized Sharpe",
+            "Sortino Ratio",
+            "Daily Volatility (Std)",
+            "CAGR",
+            "Max Drawdown",
+            "RSI(14)",
+        ]]
+    )
+
+    # A few additional “watch” signals derived from data only
+    # - most overbought / oversold by RSI
+    rsi = pd.to_numeric(df["RSI(14)"], errors="coerce")
+    overbought = df.loc[rsi.idxmax()] if rsi.notna().any() else None
+    oversold = df.loc[rsi.idxmin()] if rsi.notna().any() else None
+
+    # - biggest drawdown (worst)
+    worst_mdd = df.loc[mdd.idxmin()] if mdd.notna().any() else None
+
+    lines: list[str] = []
+    lines.append(f"# Daily Market Brief: {universe.upper()} Quantitative Overview (As of {asof_date})")
+    lines.append("")
+    lines.append(f"*Run (UTC):* {run_utc}")
+    lines.append(f"*Lookback:* {lookback} trading days")
+    lines.append("")
+
+    # Headline bullets (100% deterministic)
+    lines.append("## Headlines")
+    lines.append("")
+    lines.append(
+        f"- **Sharpe distribution:** min { _fmt_num(sharpe_min, 2) }, median { _fmt_num(sharpe_med, 2) }, max { _fmt_num(sharpe_max, 2) }."
+    )
+    lines.append(
+        f"- **Daily volatility distribution:** min { _fmt_num(vol_min, 4) }, median { _fmt_num(vol_med, 4) }, max { _fmt_num(vol_max, 4) }."
+    )
+    if worst_mdd is not None:
+        lines.append(
+            f"- **Largest drawdown name:** {str(worst_mdd['Ticker_upper'])} with max drawdown { _fmt_pct(float(worst_mdd['Max Drawdown']), 1) }."
+        )
+    if overbought is not None and oversold is not None:
+        lines.append(
+            f"- **RSI extremes (14):** highest {str(overbought['Ticker_upper'])} ({_fmt_num(float(overbought['RSI(14)']), 1)}), lowest {str(oversold['Ticker_upper'])} ({_fmt_num(float(oversold['RSI(14)']), 1)})."
+        )
+
+    lines.append("")
+    lines.append("## Leaders (Top by Annualized Sharpe)")
+    lines.append("")
+
+    # Leaders list with exact values
+    for i, row in leaders.reset_index(drop=True).iterrows():
+        lines.append(
+            f"{i+1}. **{row['Ticker_upper']}** — Sharpe {_fmt_num(row['Annualized Sharpe'], 4)}, "
+            f"Sortino {_fmt_num(row['Sortino Ratio'], 2)}, "
+            f"Daily vol {_fmt_num(row['Daily Volatility (Std)'], 4)}, "
+            f"CAGR {_fmt_pct(row['CAGR'], 1)}, "
+            f"Max DD {_fmt_pct(row['Max Drawdown'], 1)}, "
+            f"RSI14 {_fmt_num(row['RSI(14)'], 1)}"
+        )
+
+    lines.append("")
+    lines.append("## Distribution Summary")
+    lines.append("")
+    lines.append(
+        "This brief is generated deterministically from the same computed metrics that power the dashboard tables/plots. "
+        "If you see a mismatch, treat the tables as the source of truth and report the timestamp and tickers so we can reproduce."
+    )
+
+    # Optional: append the full deterministic markdown tables from ai_report
+    base_md = report.get("markdown")
+    if isinstance(base_md, str) and base_md.strip():
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("## Full Report")
+        lines.append("")
+        lines.append(base_md.strip())
+
+    return "\n".join(lines).strip() + "\n"
 
 def write_parquet(df: pd.DataFrame, universe: str) -> str:
     """Save a prices DataFrame and return relative path used in manifest."""
@@ -200,51 +336,25 @@ def _write_report_artifacts(
 
     save_report_json(daily.report, json_path)
 
-    # If OpenAI is available + key is present, generate a narrative markdown brief.
-    narrative_md = None
-    if get_openai_client is not None and build_view_context_text is not None:
-        try:
-            client = get_openai_client(None)  # use env var in Actions
-        except Exception:
-            client = None
+    # Airtight markdown brief (NO LLM): derive all values from computed metrics.
+    # We also embed the ai_report-produced markdown tables (stored in report['markdown']).
+    run_utc = datetime.now(timezone.utc).isoformat()
 
-        if client is not None:
-            try:
-                # Build a compact context. Choose a sensible default lens.
-                context_text = build_view_context_text(
-                    metrics_df=metrics_df,
-                    prices=prices,
-                    x_metric="Daily Volatility (Std)",
-                    y_metric="Annualized Sharpe",
-                    universe=universe,
-                    asof_ts=pd.to_datetime(prices.index.max()),
-                    lookback=lookback,
-                    highlight_upper=None,
-                    top_table_rows=5,
-                    include_cluster_summary=False,
-                )
+    # Ensure the JSON report carries the markdown tables (used by the deterministic brief).
+    # (ai_report returns `daily.markdown`; we store it on the report dict for downstream use.)
+    daily.report["markdown"] = daily.markdown
 
-                instructions = (
-                    "You are writing a concise daily market brief for a quantitative dashboard. "
-                    "Use ONLY the provided context. Do not invent tickers or numbers. "
-                    "Write in Markdown. Include: (1) 3–6 bullet headline takeaways; "
-                    "(2) a short paragraph on the overall distribution (risk/return dispersion); "
-                    "(3) a section called 'Leaders' referencing the top table rows by name; "
-                    "(4) a short 'What to watch' list. "
-                    "Do not exceed ~350 words."
-                )
+    brief_md = _build_deterministic_daily_brief_md(
+        report=daily.report,
+        metrics_df=metrics_df,
+        universe=universe,
+        asof_date=asof_date,
+        lookback=lookback,
+        run_utc=run_utc,
+        top_n=5,
+    )
 
-                resp = client.responses.create(
-                    model="gpt-4.1-mini",
-                    instructions=instructions,
-                    input=f"CONTEXT:\n{context_text}\n\nBASE_REPORT_JSON:\n{json.dumps(daily.report)[:12000]}\n",
-                )
-                narrative_md = getattr(resp, "output_text", None)
-            except Exception:
-                narrative_md = None
-
-    # Fallback to deterministic markdown if no narrative
-    save_report_markdown(narrative_md or daily.markdown, md_path)
+    save_report_markdown(brief_md, md_path)
 
     # Update an index.json listing recent reports
     index_path = data_repo / "reports" / "index.json"
@@ -257,7 +367,8 @@ def _write_report_artifacts(
         except Exception:
             index = {}
 
-    index.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
+    # Always refresh generated_at so the index reflects the latest successful run.
+    index["generated_at"] = datetime.now(timezone.utc).isoformat()
     index.setdefault("base_url", f"https://raw.githubusercontent.com/{github_user}/mktme-data/main")
     index.setdefault("universes", {})
     index["universes"].setdefault(universe, [])

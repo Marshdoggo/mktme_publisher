@@ -35,8 +35,23 @@ print("[run_publish] Using interpreter:", PY)
 print("[run_publish] Running:", " ".join(cmd))
 print()
 
+print("[run_publish] ENV SUMMARY:")
+for k in [
+    "MKTME_APP_SRC",
+    "MKTME_DATA_REPO",
+    "PYTHONPATH",
+    "MKTME_FORCE_REFRESH",
+]:
+    print(f"  {k} =", env.get(k))
+print()
+
 # Don't use check=True so we can see the real traceback from publish_mktme.py
 result = subprocess.run(cmd, env=env)
+
+expected = Path(env.get("MKTME_DATA_REPO", "")) / "reports" / "index.json"
+if result.returncode == 0 and not expected.exists():
+    print("[run_publish] ERROR: publish succeeded but reports/index.json not found")
+    sys.exit(2)
 
 print()
 print(f"[run_publish] publish_mktme.py exited with code {result.returncode}")
