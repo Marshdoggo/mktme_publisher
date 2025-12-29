@@ -53,6 +53,7 @@ jobs:
           MKTME_FORCE_REFRESH: "1"
           PUBLISHER_PAT: ${{ secrets.PUBLISHER_PAT }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MKTME_ENABLE_LLM_COMMENTARY: ${{ vars.MKTME_ENABLE_LLM_COMMENTARY }}
         run: |
           python run_publish.py
 
@@ -68,10 +69,13 @@ jobs:
 
           git status
 
-          if ! git diff --quiet; then
-            git add sp500/prices.parquet manifest.json reports/
+          # Stage the files we care about (including new/untracked reports)
+          git add -A sp500/prices.parquet manifest.json reports/ || true
+
+          # Commit only if something is staged
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
             git commit -m "auto daily update $(date -u +'%Y-%m-%d')"
             git push https://$GITHUB_USER:$PUBLISHER_PAT@github.com/Marshdoggo/mktme-data.git HEAD:main
-          else
-            echo "No changes to commit."
           fi

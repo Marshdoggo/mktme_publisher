@@ -39,7 +39,13 @@ if str(APP_SRC) not in sys.path:
 from fetch_data import download_prices, download_prices_fx_window
 
 # Report builders from the app repo
-from ai_report import generate_daily_report, save_report_json, save_report_markdown
+from ai_report import (
+    generate_daily_report,
+    save_report_json,
+    save_report_markdown,
+    facts_json_text,
+    validate_commentary_numbers,
+)
 
 
 # NOTE: We intentionally do NOT use an LLM to write the daily brief.
@@ -48,6 +54,75 @@ from ai_report import generate_daily_report, save_report_json, save_report_markd
 
 
 # ---- Helpers ----
+
+def _maybe_get_openai_client():
+    """Return an OpenAI client instance if available and configured, else None.
+
+    We keep this optional so the publisher can run without any OpenAI dependency.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_APIKEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI  # openai>=1.x
+        return OpenAI(api_key=api_key)
+    except Exception:
+        return None
+
+
+def _generate_llm_commentary_from_facts(facts: dict) -> str | None:
+    """Generate prose commentary using ONLY the provided facts.
+
+    We instruct the model not to invent numbers; then we validate numeric literals.
+    If validation fails, we return None.
+    """
+    if os.environ.get("MKTME_ENABLE_LLM_COMMENTARY", "0") != "1":
+        return None
+
+    client = _maybe_get_openai_client()
+    if client is None:
+        return None
+
+    model = os.environ.get("MKTME_OPENAI_MODEL", "gpt-4.1-mini")
+    facts_txt = facts_json_text(facts)
+
+    system = (
+        "You are writing market commentary for a quant dashboard. "
+        "You MUST NOT introduce any new numeric values. "
+        "If you reference any metric, you must use only the exact numbers present in FACTS_JSON. "
+        "Avoid writing numbers entirely when possible, and prefer qualitative phrasing (e.g., 'top-ranked', 'above median'). "
+        "Do not do any calculations. If something is not in FACTS_JSON, say it is not available."
+    )
+
+    user = (
+        "Write 2-4 short paragraphs of commentary based strictly on FACTS_JSON. "
+        "Focus on interpretation, concentration (is performance clustered?), risk vs return tradeoffs, and any RSI extremes. "
+        "Do NOT output markdown headings. Plain text only.\n\n"
+        f"FACTS_JSON:\n{facts_txt}"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            return None
+
+        ok, unexpected = validate_commentary_numbers(text, facts)
+        if not ok:
+            print("[publisher] LLM commentary rejected; unexpected numbers:", unexpected)
+            return None
+        return text
+    except Exception as e:
+        print(f"[publisher] LLM commentary generation failed: {e}")
+        return None
+
 
 def _fmt_pct(x: float | int | None, digits: int = 2) -> str:
     if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
@@ -336,6 +411,13 @@ def _write_report_artifacts(
 
     save_report_json(daily.report, json_path)
 
+    # Save a compact facts block (JSON) used for constrained LLM commentary and debugging.
+    facts_path = reports_dir / f"{asof_date}.facts.json"
+    try:
+        facts_path.write_text(json.dumps(daily.facts, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[publisher] Failed to write facts JSON: {e}")
+
     # Airtight markdown brief (NO LLM): derive all values from computed metrics.
     # We also embed the ai_report-produced markdown tables (stored in report['markdown']).
     run_utc = datetime.now(timezone.utc).isoformat()
@@ -353,6 +435,11 @@ def _write_report_artifacts(
         run_utc=run_utc,
         top_n=5,
     )
+
+    # Optional LLM commentary (numerically constrained to facts). If rejected, we omit it.
+    commentary = _generate_llm_commentary_from_facts(daily.facts)
+    if commentary:
+        brief_md += "\n---\n\n## Commentary (LLM)\n\n" + commentary.strip() + "\n"
 
     save_report_markdown(brief_md, md_path)
 
@@ -376,7 +463,8 @@ def _write_report_artifacts(
     # Prepend newest, keep unique, cap to 14
     rel_json = f"reports/{universe}/{asof_date}.json"
     rel_md = f"reports/{universe}/{asof_date}.md"
-    entry = {"date": asof_date, "json": rel_json, "md": rel_md}
+    rel_facts = f"reports/{universe}/{asof_date}.facts.json"
+    entry = {"date": asof_date, "json": rel_json, "md": rel_md, "facts": rel_facts}
 
     existing = index["universes"][universe]
     existing = [e for e in existing if e.get("date") != asof_date]
@@ -387,6 +475,7 @@ def _write_report_artifacts(
 
     print(f"[publisher] Wrote report JSON: {json_path}")
     print(f"[publisher] Wrote report MD:   {md_path}")
+    print(f"[publisher] Wrote report FACTS:{facts_path}")
     print(f"[publisher] Updated index:     {index_path}")
 
 

@@ -29,7 +29,7 @@ if PY is None:
     sys.exit(1)
 
 env = os.environ.copy()  # .env will be loaded by publish_mktme.py
-cmd = [str(PY), str(BASE / "publish_mktme.py")]
+cmd = [str(PY), str(BASE / "publish_mktme.py")] + sys.argv[1:]
 
 print("[run_publish] Using interpreter:", PY)
 print("[run_publish] Running:", " ".join(cmd))
@@ -41,6 +41,7 @@ for k in [
     "MKTME_DATA_REPO",
     "PYTHONPATH",
     "MKTME_FORCE_REFRESH",
+    "MKTME_MANIFEST_URL",
 ]:
     print(f"  {k} =", env.get(k))
 print()
@@ -48,10 +49,51 @@ print()
 # Don't use check=True so we can see the real traceback from publish_mktme.py
 result = subprocess.run(cmd, env=env)
 
-expected = Path(env.get("MKTME_DATA_REPO", "")) / "reports" / "index.json"
-if result.returncode == 0 and not expected.exists():
-    print("[run_publish] ERROR: publish succeeded but reports/index.json not found")
-    sys.exit(2)
+# Validate expected outputs when publish succeeds.
+# We keep these checks in the wrapper so failures are loud in CI.
+data_repo = Path(env.get("MKTME_DATA_REPO", ""))
+reports_dir = data_repo / "reports"
+index_json = reports_dir / "index.json"
+
+# We expect at minimum:
+# - reports/index.json (global index)
+# - a universe folder with at least one YYYY-MM-DD subfolder containing report.md (or report.json)
+# The universe folder name can vary (sp500, fx, etc.), so we search.
+
+def _find_any_report_leaf(root: Path) -> Path | None:
+    if not root.exists():
+        return None
+    # Look for either report.md or report.json anywhere under reports/*/YYYY-MM-DD/
+    for p in root.glob("*/*/report.md"):
+        return p
+    for p in root.glob("*/*/report.json"):
+        return p
+    return None
+
+leaf = _find_any_report_leaf(reports_dir)
+
+if result.returncode == 0:
+    missing = []
+    if not index_json.exists():
+        missing.append(str(index_json))
+    if leaf is None:
+        missing.append(str(reports_dir / "<universe>/<YYYY-MM-DD>/report.(md|json)"))
+
+    if missing:
+        print("[run_publish] ERROR: publish succeeded but expected report artifacts are missing:")
+        for m in missing:
+            print("  -", m)
+        print("\n[run_publish] Debug listing of reports/:")
+        try:
+            if reports_dir.exists():
+                for p in sorted(reports_dir.rglob("*") ):
+                    if p.is_file():
+                        print("  ", p.relative_to(data_repo))
+            else:
+                print("   reports/ directory does not exist")
+        except Exception as e:
+            print("   (listing failed)", e)
+        sys.exit(2)
 
 print()
 print(f"[run_publish] publish_mktme.py exited with code {result.returncode}")
