@@ -1,5 +1,3 @@
-# ~/mktme_publisher/run_publish.py
-
 from pathlib import Path
 import subprocess
 import os
@@ -61,13 +59,41 @@ index_json = reports_dir / "index.json"
 # The universe folder name can vary (sp500, fx, etc.), so we search.
 
 def _find_any_report_leaf(root: Path) -> Path | None:
+    """Return any file that proves at least one report exists.
+
+    Supports both layouts:
+
+      Old:
+        reports/<universe>/<YYYY-MM-DD>/report.md
+        reports/<universe>/<YYYY-MM-DD>/report.json
+
+      New:
+        reports/<universe>/<YYYY-MM-DD>.md
+        reports/<universe>/<YYYY-MM-DD>.json
+        reports/<universe>/<YYYY-MM-DD>.facts.json (optional)
+
+    We intentionally avoid treating index/manifest files as a "report".
+    """
     if not root.exists():
         return None
-    # Look for either report.md or report.json anywhere under reports/*/YYYY-MM-DD/
+
+    # New flat layout (preferred)
+    for p in root.glob("*/*.md"):
+        # exclude non-report markdown if any appear later
+        if p.name.lower() != "readme.md":
+            return p
+    for p in root.glob("*/*.json"):
+        # exclude index.json / manifest.json / facts-only files if they happen to match
+        if p.name in {"index.json", "manifest.json"}:
+            continue
+        return p
+
+    # Old nested layout
     for p in root.glob("*/*/report.md"):
         return p
     for p in root.glob("*/*/report.json"):
         return p
+
     return None
 
 leaf = _find_any_report_leaf(reports_dir)
@@ -77,7 +103,12 @@ if result.returncode == 0:
     if not index_json.exists():
         missing.append(str(index_json))
     if leaf is None:
-        missing.append(str(reports_dir / "<universe>/<YYYY-MM-DD>/report.(md|json)"))
+        missing.append(
+            str(
+                reports_dir
+                / "<universe>/<YYYY-MM-DD>.{md,json} OR <universe>/<YYYY-MM-DD>/report.{md,json}"
+            )
+        )
 
     if missing:
         print("[run_publish] ERROR: publish succeeded but expected report artifacts are missing:")
